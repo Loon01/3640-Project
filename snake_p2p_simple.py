@@ -3,8 +3,9 @@
 # ASGT: Project
 # ORGN: CMPS 3640
 # FILE: snake_p2p_simple.py
-# DATE: 
-# DESCRIPTION: A peer-to-peer versus snake game using simple socket networking.
+# DATE:
+# DESCRIPTION: A peer-to-peer versus snake game using simple socket networking
+#              with a polished Pygame UI and countdown / pause / reset.
 # ==============================================================================
 
 # === Libraries ===
@@ -16,9 +17,31 @@ import socket
 import threading
 
 # === Settings ===
-snake_speed = 15  # speed of snake
+snake_speed = 10  # speed of snake (logic FPS)
 screen_width = 720
 screen_height = 480
+CELL = 10  # grid size
+
+# --- UI Colors ---
+BORDER_COLOR = (90, 90, 90)
+GRID_COLOR = (35, 35, 35)
+BG_DARK = (15, 15, 20)
+BG_STRIPE = (22, 22, 30)
+P1_COLOR = (80, 230, 140)
+P1_OUTLINE = (30, 150, 80)
+P2_COLOR = (100, 150, 255)
+P2_OUTLINE = (40, 90, 190)
+FRUIT_COLOR = (255, 230, 80)
+FRUIT_GLOW = (255, 200, 80)
+TEXT_COLOR = (240, 240, 240)
+TEXT_SHADOW = (0, 0, 0)
+
+# Game state constants
+STATE_COUNTDOWN = "COUNTDOWN"
+STATE_RUNNING = "RUNNING"
+STATE_PAUSED = "PAUSED"
+
+COUNTDOWN_SECONDS = 3
 
 # === Setup ===
 pygame.init()
@@ -26,34 +49,88 @@ screen = pygame.display.set_mode((screen_width, screen_height))
 pygame.display.set_caption("P2P Versus Snake Game")
 fps = pygame.time.Clock()
 
+# Pre-create fonts
+FONT_SCORE = pygame.font.SysFont('consolas', 22, bold=True)
+FONT_STATUS = pygame.font.SysFont('consolas', 16)
+FONT_MENU_TITLE = pygame.font.SysFont('times new roman', 50)
+FONT_MENU_OPTION = pygame.font.SysFont('times new roman', 30)
+FONT_TITLE = pygame.font.SysFont('consolas', 26, bold=True)
+FONT_COUNTDOWN = pygame.font.SysFont('consolas', 56, bold=True)
+FONT_SUB = pygame.font.SysFont('consolas', 20)
+
 # === Network Variables ===
 server_socket = None
 client_socket = None
 peer_connected = False
 is_host = False
-local_player = None  # Will be 1 or 2
+local_player = None  # 1 or 2
 remote_snake_data = None
 data_lock = threading.Lock()
 running = True
 
-# === Snake 1 (WASD) ===
+# === Snake + Fruit State (will be reset by reset_game_state) ===
 snake1_pos = [screen_width // 4, screen_height // 2]
-snake1_body = [[100, 50], [90, 50], [80, 50], [70, 50]]
+snake1_body = []
 snake1_direction = 'RIGHT'
 snake1_change_to = snake1_direction
 snake1_score = 0
 
-# === Snake 2 (Arrow Keys) ===
 snake2_pos = [screen_width * 3 // 4, screen_height // 2]
-snake2_body = [[600, 50], [610, 50], [620, 50], [630, 50]]
+snake2_body = []
 snake2_direction = 'LEFT'
 snake2_change_to = snake2_direction
 snake2_score = 0
 
-# === Fruit ===
-fruit_pos = [random.randrange(1, (screen_width // 10)) * 10,
-             random.randrange(1, (screen_height // 10)) * 10]
+fruit_pos = [0, 0]
 fruit_spawn = True
+
+# === Game state variables ===
+game_state = STATE_COUNTDOWN
+countdown_start_ms = pygame.time.get_ticks()
+
+
+# === UI Helper Functions ===
+def draw_background(surface: pygame.Surface):
+    """Gradient stripes + grid + border."""
+    stripe_width = 80
+    for x in range(0, screen_width, stripe_width):
+        rect = pygame.Rect(x, 0, stripe_width, screen_height)
+        color = BG_DARK if (x // stripe_width) % 2 == 0 else BG_STRIPE
+        surface.fill(color, rect)
+
+    # grid
+    for x in range(0, screen_width, CELL):
+        pygame.draw.line(surface, GRID_COLOR, (x, 0), (x, screen_height), 1)
+    for y in range(0, screen_height, CELL):
+        pygame.draw.line(surface, GRID_COLOR, (0, y), (screen_width, y), 1)
+
+    # border
+    pygame.draw.rect(surface, BORDER_COLOR, (0, 0, screen_width, screen_height), 3)
+
+
+def draw_snake(surface, body, fill_color, outline_color):
+    for seg in body:
+        x, y = seg
+        rect = pygame.Rect(x, y, CELL, CELL)
+        pygame.draw.rect(surface, outline_color, rect, border_radius=4)
+        inner = rect.inflate(-4, -4)
+        pygame.draw.rect(surface, fill_color, inner, border_radius=4)
+
+
+def draw_fruit(surface, pos):
+    cx = pos[0] + CELL // 2
+    cy = pos[1] + CELL // 2
+    pygame.draw.circle(surface, FRUIT_GLOW, (cx, cy), CELL // 2)
+    pygame.draw.circle(surface, FRUIT_COLOR, (cx, cy), CELL // 3)
+
+
+def draw_center_text(surface, font, text, y_offset=0):
+    shadow = font.render(text, True, TEXT_SHADOW)
+    surf = font.render(text, True, TEXT_COLOR)
+    rect = surf.get_rect()
+    rect.center = (screen_width // 2, screen_height // 2 + y_offset)
+    surface.blit(shadow, (rect.x + 2, rect.y + 2))
+    surface.blit(surf, rect)
 
 
 # === Network Functions ===
@@ -233,24 +310,81 @@ def init_client(host_ip, host_port=8468):
 
 
 # === Score display ===
-def show_score(color, font, size):
-    score_font = pygame.font.SysFont(font, size)
-    
-    score_surface1 = score_font.render('P1 Score: ' + str(snake1_score), True, color)
-    score_surface2 = score_font.render('P2 Score: ' + str(snake2_score), True, color)
-    
-    screen.blit(score_surface1, (10, 5))
-    screen.blit(score_surface2, (screen_width - 160, 5))
+def show_score():
+    font = FONT_SCORE
+    s1 = font.render('P1: ' + str(snake1_score), True, TEXT_COLOR)
+    s2 = font.render('P2: ' + str(snake2_score), True, TEXT_COLOR)
+
+    screen.blit(font.render('P1: ' + str(snake1_score), True, TEXT_SHADOW), (11, 46))
+    screen.blit(s1, (10, 45))
+
+    x2 = screen_width - 10 - s2.get_width()
+    screen.blit(font.render('P2: ' + str(snake2_score), True, TEXT_SHADOW), (x2 + 1, 46))
+    screen.blit(s2, (x2, 45))
 
 
 # === Connection Status Display ===
 def show_connection_status():
-    font = pygame.font.SysFont('times new roman', 16)
     status = "Connected" if peer_connected else "Waiting for peer..."
-    color = "green" if peer_connected else "yellow"
-    
-    status_surface = font.render(status, True, color)
-    screen.blit(status_surface, (screen_width // 2 - 60, 5))
+    color = (100, 255, 120) if peer_connected else (255, 220, 100)
+
+    shadow = FONT_STATUS.render(status, True, TEXT_SHADOW)
+    surf = FONT_STATUS.render(status, True, color)
+    rect = surf.get_rect()
+    rect.midtop = (screen_width // 2, 5)
+    screen.blit(shadow, (rect.x + 1, rect.y + 1))
+    screen.blit(surf, rect)
+
+
+def draw_controls():
+    text = "P1: WASD   P2: Arrows   P: Pause   R: Reset   ESC: Quit"
+    shadow = FONT_STATUS.render(text, True, TEXT_SHADOW)
+    surf = FONT_STATUS.render(text, True, TEXT_COLOR)
+    rect = surf.get_rect()
+    rect.midbottom = (screen_width // 2, screen_height - 6)
+    screen.blit(shadow, (rect.x + 1, rect.y + 1))
+    screen.blit(surf, rect)
+
+
+# === Reset Game State ===
+def reset_game_state():
+    global snake1_pos, snake1_body, snake1_direction, snake1_change_to, snake1_score
+    global snake2_pos, snake2_body, snake2_direction, snake2_change_to, snake2_score
+    global fruit_pos, fruit_spawn
+
+    # Snake 1
+    snake1_pos = [screen_width // 4, screen_height // 2]
+    snake1_pos[0] = (snake1_pos[0] // CELL) * CELL
+    snake1_pos[1] = (snake1_pos[1] // CELL) * CELL
+    snake1_body = [
+        [snake1_pos[0], snake1_pos[1]],
+        [snake1_pos[0] - CELL, snake1_pos[1]],
+        [snake1_pos[0] - 2*CELL, snake1_pos[1]],
+        [snake1_pos[0] - 3*CELL, snake1_pos[1]],
+    ]
+    snake1_direction = 'RIGHT'
+    snake1_change_to = snake1_direction
+    snake1_score = 0
+
+    # Snake 2
+    snake2_pos = [screen_width * 3 // 4, screen_height // 2]
+    snake2_pos[0] = (snake2_pos[0] // CELL) * CELL
+    snake2_pos[1] = (snake2_pos[1] // CELL) * CELL
+    snake2_body = [
+        [snake2_pos[0], snake2_pos[1]],
+        [snake2_pos[0] + CELL, snake2_pos[1]],
+        [snake2_pos[0] + 2*CELL, snake2_pos[1]],
+        [snake2_pos[0] + 3*CELL, snake2_pos[1]],
+    ]
+    snake2_direction = 'LEFT'
+    snake2_change_to = snake2_direction
+    snake2_score = 0
+
+    fruit_pos[:] = [
+        random.randrange(1, (screen_width // CELL)) * CELL,
+        random.randrange(1, (screen_height // CELL)) * CELL,
+    ]
+    fruit_spawn = True
 
 
 # === Game Over ===
@@ -259,11 +393,23 @@ def game_over(winner=None):
     my_font = pygame.font.SysFont('times new roman', 50)
     msg = "Draw!" if not winner else f"{winner} Wins!"
     
-    game_over_surface = my_font.render(msg, True, "red")
-    rect = game_over_surface.get_rect()
+    # Draw final frame UI
+    draw_background(screen)
+    draw_snake(screen, snake1_body, P1_COLOR, P1_OUTLINE)
+    draw_snake(screen, snake2_body, P2_COLOR, P2_OUTLINE)
+    draw_fruit(screen, fruit_pos)
+    show_score()
+    show_connection_status()
+    draw_controls()
+
+    # Overlay message with shadow
+    shadow = my_font.render(msg, True, TEXT_SHADOW)
+    text_surf = my_font.render(msg, True, (255, 80, 80))
+    rect = text_surf.get_rect()
     rect.midtop = (screen_width / 2, screen_height / 4)
+    screen.blit(shadow, (rect.x + 2, rect.y + 2))
+    screen.blit(text_surf, rect)
     
-    screen.blit(game_over_surface, rect)
     pygame.display.flip()
     
     time.sleep(2)
@@ -288,16 +434,22 @@ def game_over(winner=None):
 # === Main Menu ===
 def main_menu():
     """Display main menu for connection setup"""
-    screen.fill("black")
-    font_title = pygame.font.SysFont('times new roman', 50)
-    font_option = pygame.font.SysFont('times new roman', 30)
+    draw_background(screen)
     
-    title = font_title.render("P2P Snake Game", True, "white")
-    option1 = font_option.render("Press H to HOST (Player 1)", True, "green")
-    option2 = font_option.render("Press J to JOIN (Player 2)", True, "blue")
+    title = FONT_MENU_TITLE.render("P2P Snake Game", True, "white")
+    option1 = FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, "green")
+    option2 = FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, "blue")
     
+    screen.blit(FONT_MENU_TITLE.render("P2P Snake Game", True, TEXT_SHADOW),
+                (screen_width // 2 - 200 + 2, 100 + 2))
     screen.blit(title, (screen_width // 2 - 200, 100))
+
+    screen.blit(FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, TEXT_SHADOW),
+                (screen_width // 2 - 220 + 2, 250 + 2))
     screen.blit(option1, (screen_width // 2 - 220, 250))
+
+    screen.blit(FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, TEXT_SHADOW),
+                (screen_width // 2 - 220 + 2, 300 + 2))
     screen.blit(option2, (screen_width // 2 - 220, 300))
     
     pygame.display.flip()
@@ -329,10 +481,13 @@ def main_menu():
 def main():
     global snake1_pos, snake1_body, snake1_direction, snake1_change_to, snake1_score
     global snake2_pos, snake2_body, snake2_direction, snake2_change_to, snake2_score
-    global fruit_pos, fruit_spawn, running
+    global fruit_pos, fruit_spawn, running, game_state, countdown_start_ms
     
     # Show menu and setup connection
     main_menu()
+    reset_game_state()
+    game_state = STATE_COUNTDOWN
+    countdown_start_ms = pygame.time.get_ticks()
     
     # Main game loop
     while running:
@@ -347,27 +502,7 @@ def main():
                 pygame.quit()
                 quit()
             elif event.type == pygame.KEYDOWN:
-                # Only handle controls for local player
-                if local_player == 1:
-                    if event.key == pygame.K_w:
-                        snake1_change_to = 'UP'
-                    if event.key == pygame.K_s:
-                        snake1_change_to = 'DOWN'
-                    if event.key == pygame.K_a:
-                        snake1_change_to = 'LEFT'
-                    if event.key == pygame.K_d:
-                        snake1_change_to = 'RIGHT'
-                
-                elif local_player == 2:
-                    if event.key == pygame.K_UP:
-                        snake2_change_to = 'UP'
-                    elif event.key == pygame.K_DOWN:
-                        snake2_change_to = 'DOWN'
-                    elif event.key == pygame.K_LEFT:
-                        snake2_change_to = 'LEFT'
-                    elif event.key == pygame.K_RIGHT:
-                        snake2_change_to = 'RIGHT'
-                
+                # ESC always quits
                 if event.key == pygame.K_ESCAPE:
                     running = False
                     if client_socket:
@@ -377,124 +512,195 @@ def main():
                     pygame.quit()
                     quit()
 
+                # Pause / resume (local)
+                if event.key == pygame.K_p and peer_connected:
+                    if game_state == STATE_RUNNING:
+                        game_state = STATE_PAUSED
+                    elif game_state == STATE_PAUSED:
+                        game_state = STATE_RUNNING
+
+                # Reset: re-center snakes, scores, fruit, restart countdown
+                if event.key == pygame.K_r and peer_connected:
+                    reset_game_state()
+                    game_state = STATE_COUNTDOWN
+                    countdown_start_ms = pygame.time.get_ticks()
+
+                # Movement only when in running or countdown
+                if game_state in (STATE_RUNNING, STATE_COUNTDOWN):
+                    if local_player == 1:
+                        if event.key == pygame.K_w:
+                            snake1_change_to = 'UP'
+                        if event.key == pygame.K_s:
+                            snake1_change_to = 'DOWN'
+                        if event.key == pygame.K_a:
+                            snake1_change_to = 'LEFT'
+                        if event.key == pygame.K_d:
+                            snake1_change_to = 'RIGHT'
+                    
+                    elif local_player == 2:
+                        if event.key == pygame.K_UP:
+                            snake2_change_to = 'UP'
+                        elif event.key == pygame.K_DOWN:
+                            snake2_change_to = 'DOWN'
+                        elif event.key == pygame.K_LEFT:
+                            snake2_change_to = 'LEFT'
+                        elif event.key == pygame.K_RIGHT:
+                            snake2_change_to = 'RIGHT'
+
         # Only proceed with game logic if peer is connected
         if not peer_connected:
-            screen.fill("black")
+            draw_background(screen)
             show_connection_status()
+            draw_controls()
             pygame.display.update()
             fps.tick(10)
             continue
 
-        # Update remote snake state
+        # countdown state
+        if game_state == STATE_COUNTDOWN:
+            now = pygame.time.get_ticks()
+            elapsed = (now - countdown_start_ms) / 1000.0
+            if elapsed >= COUNTDOWN_SECONDS:
+                game_state = STATE_RUNNING
+
+        # Update remote snake state (always read network)
         update_remote_snake()
 
-        # --- Local player controls ---
-        if local_player == 1:
-            # Prevents 180 degree turns
-            if snake1_change_to == 'UP' and snake1_direction != 'DOWN':
-                snake1_direction = 'UP'
-            if snake1_change_to == 'DOWN' and snake1_direction != 'UP':
-                snake1_direction = 'DOWN'
-            if snake1_change_to == 'LEFT' and snake1_direction != 'RIGHT':
-                snake1_direction = 'LEFT'
-            if snake1_change_to == 'RIGHT' and snake1_direction != 'LEFT':
-                snake1_direction = 'RIGHT'
-            
-            # Moving the snake
-            if snake1_direction == 'UP':
-                snake1_pos[1] -= 10
-            if snake1_direction == 'DOWN':
-                snake1_pos[1] += 10
-            if snake1_direction == 'LEFT':
-                snake1_pos[0] -= 10
-            if snake1_direction == 'RIGHT':
-                snake1_pos[0] += 10
-            
-            # Grow Snake / Eat fruit
-            snake1_body.insert(0, list(snake1_pos))
-            
-            if list(snake1_pos) == fruit_pos:
-                snake1_score += 10
-                fruit_spawn = False
-            else:
-                snake1_body.pop()
+        # --- Local player controls & movement (only when RUNNING) ---
+        if game_state == STATE_RUNNING:
+            if local_player == 1:
+                # Prevents 180 degree turns
+                if snake1_change_to == 'UP' and snake1_direction != 'DOWN':
+                    snake1_direction = 'UP'
+                if snake1_change_to == 'DOWN' and snake1_direction != 'UP':
+                    snake1_direction = 'DOWN'
+                if snake1_change_to == 'LEFT' and snake1_direction != 'RIGHT':
+                    snake1_direction = 'LEFT'
+                if snake1_change_to == 'RIGHT' and snake1_direction != 'LEFT':
+                    snake1_direction = 'RIGHT'
+                
+                # Moving the snake
+                if snake1_direction == 'UP':
+                    snake1_pos[1] -= CELL
+                if snake1_direction == 'DOWN':
+                    snake1_pos[1] += CELL
+                if snake1_direction == 'LEFT':
+                    snake1_pos[0] -= CELL
+                if snake1_direction == 'RIGHT':
+                    snake1_pos[0] += CELL
+                
+                # Grow Snake / Eat fruit
+                snake1_body.insert(0, list(snake1_pos))
+                
+                if list(snake1_pos) == fruit_pos:
+                    snake1_score += 10
+                    fruit_spawn = False
+                else:
+                    snake1_body.pop()
 
-        elif local_player == 2:
-            # Prevents 180 degree turns
-            if snake2_change_to == 'UP' and snake2_direction != 'DOWN':
-                snake2_direction = 'UP'
-            if snake2_change_to == 'DOWN' and snake2_direction != 'UP':
-                snake2_direction = 'DOWN'
-            if snake2_change_to == 'LEFT' and snake2_direction != 'RIGHT':
-                snake2_direction = 'LEFT'
-            if snake2_change_to == 'RIGHT' and snake2_direction != 'LEFT':
-                snake2_direction = 'RIGHT'
-            
-            # Moving the snake
-            if snake2_direction == 'UP':
-                snake2_pos[1] -= 10
-            if snake2_direction == 'DOWN':
-                snake2_pos[1] += 10
-            if snake2_direction == 'LEFT':
-                snake2_pos[0] -= 10
-            if snake2_direction == 'RIGHT':
-                snake2_pos[0] += 10
-            
-            # Grow Snake / Eat fruit
-            snake2_body.insert(0, list(snake2_pos))
-            
-            if list(snake2_pos) == fruit_pos:
-                snake2_score += 10
-                fruit_spawn = False
-            else:
-                snake2_body.pop()
+            elif local_player == 2:
+                # Prevents 180 degree turns
+                if snake2_change_to == 'UP' and snake2_direction != 'DOWN':
+                    snake2_direction = 'UP'
+                if snake2_change_to == 'DOWN' and snake2_direction != 'UP':
+                    snake2_direction = 'DOWN'
+                if snake2_change_to == 'LEFT' and snake2_direction != 'RIGHT':
+                    snake2_direction = 'LEFT'
+                if snake2_change_to == 'RIGHT' and snake2_direction != 'LEFT':
+                    snake2_direction = 'RIGHT'
+                
+                # Moving the snake
+                if snake2_direction == 'UP':
+                    snake2_pos[1] -= CELL
+                if snake2_direction == 'DOWN':
+                    snake2_pos[1] += CELL
+                if snake2_direction == 'LEFT':
+                    snake2_pos[0] -= CELL
+                if snake2_direction == 'RIGHT':
+                    snake2_pos[0] += CELL
+                
+                # Grow Snake / Eat fruit
+                snake2_body.insert(0, list(snake2_pos))
+                
+                if list(snake2_pos) == fruit_pos:
+                    snake2_score += 10
+                    fruit_spawn = False
+                else:
+                    snake2_body.pop()
 
-        # Host handles fruit spawning
-        if is_host and not fruit_spawn:
-            fruit_pos = [random.randrange(1, (screen_width // 10)) * 10,
-                        random.randrange(1, (screen_height // 10)) * 10]
-            fruit_spawn = True
+            # Host handles fruit spawning
+            if is_host and not fruit_spawn:
+                fruit_pos[:] = [
+                    random.randrange(1, (screen_width // CELL)) * CELL,
+                    random.randrange(1, (screen_height // CELL)) * CELL
+                ]
+                fruit_spawn = True
 
-        # Send local state to peer
-        send_game_state()
+        # Send local state to peer (during countdown + running so they see reset)
+        if game_state in (STATE_RUNNING, STATE_COUNTDOWN):
+            send_game_state()
 
         # --- Draw Everything ---
-        screen.fill("black")
+        draw_background(screen)
 
-        for pos in snake1_body:
-            pygame.draw.rect(screen, "green", pygame.Rect(pos[0], pos[1], 10, 10))
-        for pos in snake2_body:
-            pygame.draw.rect(screen, "blue", pygame.Rect(pos[0], pos[1], 10, 10))
+        # Title
+        title_shadow = FONT_TITLE.render("P2P Versus Snake", True, TEXT_SHADOW)
+        title_surf = FONT_TITLE.render("P2P Versus Snake", True, TEXT_COLOR)
+        screen.blit(title_shadow, (screen_width//2 - title_surf.get_width()//2 + 2, 18 + 2))
+        screen.blit(title_surf, (screen_width//2 - title_surf.get_width()//2, 18))
 
-        pygame.draw.rect(screen, "white", pygame.Rect(fruit_pos[0], fruit_pos[1], 10, 10))
+        draw_snake(screen, snake1_body, P1_COLOR, P1_OUTLINE)
+        draw_snake(screen, snake2_body, P2_COLOR, P2_OUTLINE)
+        draw_fruit(screen, fruit_pos)
 
-        # --- Collision: Walls ---
-        for snake, pos, name in [
-            (snake1_body, snake1_pos, "Player 2"),
-            (snake2_body, snake2_pos, "Player 1")
-        ]:
-            if pos[0] < 0 or pos[0] > screen_width - 10 or pos[1] < 0 or pos[1] > screen_height - 10:
-                game_over(name)
-        
-        # --- Collision: Self ---
-        for block in snake1_body[1:]:
-            if snake1_pos[0] == block[0] and snake1_pos[1] == block[1]:
-                game_over("Player 2")
-        for block in snake2_body[1:]:
-            if snake2_pos[0] == block[0] and snake2_pos[1] == block[1]:
-                game_over("Player 1")
+        # Collisions only in RUNNING state
+        if game_state == STATE_RUNNING:
+            # Collision: Walls
+            for snake, pos, name in [
+                (snake1_body, snake1_pos, "Player 2"),
+                (snake2_body, snake2_pos, "Player 1")
+            ]:
+                if pos[0] < 0 or pos[0] > screen_width - CELL or pos[1] < 0 or pos[1] > screen_height - CELL:
+                    game_over(name)
+            
+            # Collision: Self
+            for block in snake1_body[1:]:
+                if snake1_pos[0] == block[0] and snake1_pos[1] == block[1]:
+                    game_over("Player 2")
+            for block in snake2_body[1:]:
+                if snake2_pos[0] == block[0] and snake2_pos[1] == block[1]:
+                    game_over("Player 1")
 
-        # --- Collision between snakes ---
-        for block in snake1_body:
-            if snake2_pos[0] == block[0] and snake2_pos[1] == block[1]:
-                game_over("Player 1")
-        for block in snake2_body:
-            if snake1_pos[0] == block[0] and snake1_pos[1] == block[1]:
-                game_over("Player 2")
+            # Collision between snakes
+            for block in snake1_body:
+                if snake2_pos[0] == block[0] and snake2_pos[1] == block[1]:
+                    game_over("Player 1")
+            for block in snake2_body:
+                if snake1_pos[0] == block[0] and snake1_pos[1] == block[1]:
+                    game_over("Player 2")
 
-        # --- Display Scores and Status ---
-        show_score("white", 'times new roman', 20)
+        # HUD
+        show_score()
         show_connection_status()
+        draw_controls()
+
+        # Overlays for countdown / pause
+        if game_state == STATE_COUNTDOWN:
+            now = pygame.time.get_ticks()
+            elapsed = (now - countdown_start_ms) / 1000.0
+            remaining = max(0.0, COUNTDOWN_SECONDS - elapsed)
+            if remaining > 0.5:
+                num = int(remaining) + 1
+                msg = str(num)
+            else:
+                msg = "GO!"
+            draw_center_text(screen, FONT_COUNTDOWN, msg, y_offset=-10)
+            draw_center_text(screen, FONT_SUB, "Round starting...", y_offset=40)
+
+        elif game_state == STATE_PAUSED:
+            draw_center_text(screen, FONT_COUNTDOWN, "PAUSED", y_offset=-10)
+            draw_center_text(screen, FONT_SUB, "Press P to resume or R to reset", y_offset=40)
+
         pygame.display.update()
         fps.tick(snake_speed)
 
