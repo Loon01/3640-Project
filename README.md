@@ -15,4 +15,4 @@
 
 - To run file, do:
 
-  - python3 snake.py
+  - python3 snake_p2p_simple.py
