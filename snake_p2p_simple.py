@@ -522,7 +522,9 @@ def main():
     
     # Show menu and setup connection
     main_menu()
+    # reset_game_state()
     game_state = STATE_COUNTDOWN
+    # countdown_start_ms = pygame.time.get_ticks()
     countdown_start_ms = 0      # WILL BE SET AFTER PEER CONNECTS
     connection_initialized = False
     
@@ -569,8 +571,8 @@ def main():
                     paused_by = None
                     send_control_message('reset')
 
-                # Movement only when in running or countdown
-                if game_state in (STATE_RUNNING, STATE_COUNTDOWN):
+                # Movement only when actively RUNNINNG
+                if game_state == STATE_RUNNING:
                     if local_player == 1:
                         if event.key == pygame.K_w:
                             snake1_change_to = 'UP'
@@ -749,7 +751,9 @@ def main():
 
         elif game_state == STATE_PAUSED:
             draw_center_text(screen, FONT_COUNTDOWN, "PAUSED", y_offset=-10)
-            draw_center_text(screen, FONT_SUB, "Press P to resume or R to reset", y_offset=40)
+            info = f"{paused_by} paused the game" if paused_by else "Game paused"
+            draw_center_text(screen, FONT_SUB, info, y_offset=40)
+            draw_center_text(screen, FONT_SUB, "Press P to resume or R to reset", y_offset=80)
 
         pygame.display.update()
         fps.tick(snake_speed)
