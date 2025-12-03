@@ -86,7 +86,9 @@ fruit_spawn = True
 
 # === Game state variables ===
 game_state = STATE_COUNTDOWN
-countdown_start_ms = pygame.time.get_ticks()
+countdown_start_ms = 0        # SET AFTER PEER CONNECTS
+connection_initialized = False  # RUN RESET/COUNTDOWNN AFTER CONNECT?
+paused_by = None  # WHO PAUSED ("P1"/"P2")
 
 
 # === UI Helper Functions ===
@@ -136,7 +138,7 @@ def draw_center_text(surface, font, text, y_offset=0):
 # === Network Functions ===
 def receive_messages(sock):
     """Continuously receive messages from peer"""
-    global remote_snake_data, peer_connected, running
+    global remote_snake_data, peer_connected, running, game_state, countdown_start_ms, paused_by
     buffer = ""
     
     while running:
@@ -155,11 +157,27 @@ def receive_messages(sock):
                     try:
                         msg = json.loads(line)
                         with data_lock:
-                            if msg.get('type') == 'game_state':
+                            msg_type = msg.get('type') 
+                            if msg_type == 'game_state':
                                 remote_snake_data = msg
-                            elif msg.get('type') == 'connect':
+                            elif msg_type == 'connect':
                                 peer_connected = True
                                 print(f"Peer connected: Player {msg.get('player_id')}")
+                            elif msg_type == 'pause':
+                                game_state = STATE_PAUSED
+                                sender = msg.get('by')
+                                if sender in (1, 2):
+                                    paused_by = f"Player {sender}"
+                                else:
+                                    paused_by = "Peer"
+                            elif msg_type == 'resume':
+                                game_state = STATE_RUNNING
+                                paused_by = None
+                            elif msg_type == 'reset':
+                                # Peer requested a reset – sync our state
+                                reset_game_state()
+                                game_state = STATE_COUNTDOWN
+                                countdown_start_ms = pygame.time.get_ticks()
                     except json.JSONDecodeError:
                         pass
         except socket.timeout:
@@ -169,10 +187,20 @@ def receive_messages(sock):
                 print(f"Error receiving: {e}")
             break
 
+# DEBUGGER FUNCTION
+def send_control_message(msg_type: str):
+    """Send a simple control message (e.g., pause, resume, reset) to peer."""
+    global client_socket, local_player
+    if client_socket and peer_connected:
+        try:
+            msg = json.dumps({'type': msg_type, 'by': local_player}) + '\n'
+            client_socket.sendall(msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Error sending control message: {e}")
 
 def send_game_state():
     """Send local snake state to peer"""
-    global client_socket
+    global client_socket, game_state
     
     if client_socket and peer_connected:
         if local_player == 1:
@@ -186,13 +214,16 @@ def send_game_state():
                 'fruit_pos': fruit_pos if is_host else None
             }
         else:
+            # FOR CLIENT (P2), ALSO TELL HOST IF WE ATE FRUIT  
+            ate = (list(snake2_pos) == fruit_pos and game_state == STATE_RUNNING)
             state = {
                 'type': 'game_state',
                 'player': 2,
                 'pos': snake2_pos,
                 'body': snake2_body,
                 'direction': snake2_direction,
-                'score': snake2_score
+                'score': snake2_score,
+                "ate_fruit": ate
             }
         
         try:
@@ -206,7 +237,7 @@ def update_remote_snake():
     """Update the remote snake from received data"""
     global snake1_pos, snake1_body, snake1_direction, snake1_score
     global snake2_pos, snake2_body, snake2_direction, snake2_score
-    global fruit_pos
+    global fruit_pos, fruit_spawn, is_host
     
     with data_lock:
         if remote_snake_data:
@@ -222,6 +253,12 @@ def update_remote_snake():
                 snake2_body = remote_snake_data['body']
                 snake2_direction = remote_snake_data['direction']
                 snake2_score = remote_snake_data['score']
+                # ON HOST, MAKE SURE WE RESPAWN FRUIT IF P2 ATE
+                if is_host:
+                    ate_flag = remote_snake_data.get('ate_fruit', False)
+                    # CHECK POSITION MATCH
+                    if ate_flag or list(snake2_pos) == fruit_pos:
+                        fruit_spawn = False
 
 
 def init_host(port=8468):
@@ -481,13 +518,13 @@ def main_menu():
 def main():
     global snake1_pos, snake1_body, snake1_direction, snake1_change_to, snake1_score
     global snake2_pos, snake2_body, snake2_direction, snake2_change_to, snake2_score
-    global fruit_pos, fruit_spawn, running, game_state, countdown_start_ms
+    global fruit_pos, fruit_spawn, running, game_state, countdown_start_ms, connection_initialized, paused_by
     
     # Show menu and setup connection
     main_menu()
-    reset_game_state()
     game_state = STATE_COUNTDOWN
-    countdown_start_ms = pygame.time.get_ticks()
+    countdown_start_ms = 0      # WILL BE SET AFTER PEER CONNECTS
+    connection_initialized = False
     
     # Main game loop
     while running:
@@ -516,14 +553,21 @@ def main():
                 if event.key == pygame.K_p and peer_connected:
                     if game_state == STATE_RUNNING:
                         game_state = STATE_PAUSED
+                        paused_by = f"Player {local_player}"
+                        send_control_message('pause')
                     elif game_state == STATE_PAUSED:
-                        game_state = STATE_RUNNING
+                        if paused_by == f"Player {local_player}":
+                            game_state = STATE_RUNNING
+                            paused_by = None
+                            send_control_message('resume')
 
                 # Reset: re-center snakes, scores, fruit, restart countdown
                 if event.key == pygame.K_r and peer_connected:
                     reset_game_state()
                     game_state = STATE_COUNTDOWN
                     countdown_start_ms = pygame.time.get_ticks()
+                    paused_by = None
+                    send_control_message('reset')
 
                 # Movement only when in running or countdown
                 if game_state in (STATE_RUNNING, STATE_COUNTDOWN):
@@ -555,6 +599,12 @@ def main():
             pygame.display.update()
             fps.tick(10)
             continue
+
+        # FIRST TIME WE DETECT CONNECTION: RESET AND RESTART COUNTDOWN ON BOTH SIDES
+        if not connection_initialized:
+            reset_game_state()
+            countdown_start_ms = pygame.time.get_ticks()
+            connection_initialized = True
 
         # countdown state
         if game_state == STATE_COUNTDOWN:
