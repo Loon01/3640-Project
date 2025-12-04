@@ -67,6 +67,9 @@ local_player = None  # 1 or 2
 remote_snake_data = None
 data_lock = threading.Lock()
 running = True
+typed_ip = "" # ADD IP 
+typing_ip = False
+host_ip_text = ""  # TEXT SHOWN ON HOST SCREEN
 
 # === Snake + Fruit State (will be reset by reset_game_state) ===
 snake1_pos = [screen_width // 4, screen_height // 2]
@@ -263,7 +266,7 @@ def update_remote_snake():
 
 def init_host(port=8468):
     """Initialize as host (Player 1)"""
-    global server_socket, client_socket, is_host, local_player, peer_connected
+    global server_socket, client_socket, is_host, local_player, peer_connected, host_ip_text
     
     is_host = True
     local_player = 1
@@ -281,6 +284,9 @@ def init_host(port=8468):
         local_ip = socket.gethostbyname(hostname)
     except:
         local_ip = "Unable to get IP"
+
+    # store for on-screen display
+    host_ip_text = f"{local_ip}:{port}"
     
     print(f"Host started!")
     print(f"Local IP: {local_ip}")
@@ -314,6 +320,36 @@ def init_host(port=8468):
     
     accept_thread = threading.Thread(target=accept_connection, daemon=True)
     accept_thread.start()
+
+def host_wait_screen():
+    """Show waiting screen for host until peer connects or ESC is pressed."""
+    global running, host_ip_text, peer_connected
+
+    waiting = True
+    while waiting and not peer_connected:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                quit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    # HOST CANCELS AND RETURNS TO MENU 
+                    return False  
+
+        # DRAW UI
+        draw_background(screen)
+        draw_center_text(screen, FONT_TITLE, "HOSTING GAME", y_offset=-80)
+        draw_center_text(screen, FONT_SUB, "Waiting for Player 2 to connect...", y_offset=-20)
+
+        if host_ip_text:
+            draw_center_text(screen, FONT_STATUS, f"Your IP: {host_ip_text}", y_offset=40)
+
+        draw_center_text(screen, FONT_STATUS, "Press ESC to cancel", y_offset=90)
+
+        pygame.display.update()
+        fps.tick(20)
+
+    return True  # Peer connected, continue into game
 
 
 def init_client(host_ip, host_port=8468):
@@ -362,15 +398,34 @@ def show_score():
 
 # === Connection Status Display ===
 def show_connection_status():
-    status = "Connected" if peer_connected else "Waiting for peer..."
-    color = (100, 255, 120) if peer_connected else (255, 220, 100)
+    # text + color
+    if peer_connected:
+        status = "Connected"
+        color = (100, 255, 120)
+    else:
+        if is_host:
+            status = "Waiting for peer..."
+        else:
+            status = "Connecting to host..."
+        color = (255, 220, 100)
 
+    # FIRST LINE (STATUS)
     shadow = FONT_STATUS.render(status, True, TEXT_SHADOW)
     surf = FONT_STATUS.render(status, True, color)
     rect = surf.get_rect()
     rect.midtop = (screen_width // 2, 5)
     screen.blit(shadow, (rect.x + 1, rect.y + 1))
     screen.blit(surf, rect)
+
+    # SECOND LINE: SHOW IP, ONLY FOR HOST WHILE WAITING
+    if is_host and not peer_connected and host_ip_text:
+        ip_label = f"Your IP: {host_ip_text}"
+        ip_surf_shadow = FONT_STATUS.render(ip_label, True, TEXT_SHADOW)
+        ip_surf = FONT_STATUS.render(ip_label, True, TEXT_COLOR)
+        ip_rect = ip_surf.get_rect()
+        ip_rect.midtop = (screen_width // 2, 22) 
+        screen.blit(ip_surf_shadow, (ip_rect.x + 1, ip_rect.y + 1))
+        screen.blit(ip_surf, ip_rect)
 
 
 def draw_controls():
@@ -471,47 +526,98 @@ def game_over(winner=None):
 # === Main Menu ===
 def main_menu():
     """Display main menu for connection setup"""
-    draw_background(screen)
-    
-    title = FONT_MENU_TITLE.render("P2P Snake Game", True, "white")
-    option1 = FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, "green")
-    option2 = FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, "blue")
-    
-    screen.blit(FONT_MENU_TITLE.render("P2P Snake Game", True, TEXT_SHADOW),
-                (screen_width // 2 - 200 + 2, 100 + 2))
-    screen.blit(title, (screen_width // 2 - 200, 100))
-
-    screen.blit(FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, TEXT_SHADOW),
-                (screen_width // 2 - 220 + 2, 250 + 2))
-    screen.blit(option1, (screen_width // 2 - 220, 250))
-
-    screen.blit(FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, TEXT_SHADOW),
-                (screen_width // 2 - 220 + 2, 300 + 2))
-    screen.blit(option2, (screen_width // 2 - 220, 300))
-    
-    pygame.display.flip()
-    
+    global typed_ip  # input buffer for JOIN
+    typed_ip = ""
     waiting = True
+    mode = "MAIN"   # "MAIN" or "JOIN"
+
     while waiting:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 quit()
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_h:
-                    init_host()
-                    waiting = False
-                elif event.key == pygame.K_j:
-                    print("\nEnter host IP address:")
-                    host_ip = input("Host IP: ").strip()
-                    try:
-                        init_client(host_ip)
+                # -------- MAIN MENU MODE --------
+                if mode == "MAIN":
+                    if event.key == pygame.K_h:
+                        init_host()
+
+                        # SHOW WAIT SCREEN, IF CANCEL, RESTART MENU
+                        if not host_wait_screen():
+                            return main_menu()
+
+                        # IF PEER CONNECTS, LEAVE MENU AND START GAME
                         waiting = False
-                    except:
-                        print("Failed to connect. Press J to try again.")
-                elif event.key == pygame.K_ESCAPE:
-                    pygame.quit()
-                    quit()
+
+                    elif event.key == pygame.K_j:
+                        # switch to IP entry screen
+                        typed_ip = ""
+                        mode = "JOIN"
+
+                    elif event.key == pygame.K_ESCAPE:
+                        pygame.quit()
+                        quit()
+
+                # -------- JOIN / IP ENTRY MODE --------
+                elif mode == "JOIN":
+                    if event.key == pygame.K_ESCAPE:
+                        # go back to main menu
+                        mode = "MAIN"
+                        typed_ip = ""
+
+                    elif event.key == pygame.K_RETURN:
+                        # try to connect
+                        if typed_ip.strip() != "":
+                            try:
+                                init_client(typed_ip.strip())
+                                waiting = False   # success -> leave menu
+                            except Exception as e:
+                                print(f"Failed to connect: {e}")
+                                typed_ip = ""     # clear on failure
+
+                    elif event.key == pygame.K_BACKSPACE:
+                        typed_ip = typed_ip[:-1]
+
+                    else:
+                        # add typed characters (limit length)
+                        if len(typed_ip) < 30:
+                            typed_ip += event.unicode
+
+        # --------- DRAW CURRENT SCREEN ---------
+        draw_background(screen)
+
+        if mode == "MAIN":
+            # main menu UI
+            title = FONT_MENU_TITLE.render("P2P Snake Game", True, "white")
+            option1 = FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, "green")
+            option2 = FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, "blue")
+
+            # title + options with shadow
+            screen.blit(FONT_MENU_TITLE.render("P2P Snake Game", True, TEXT_SHADOW),
+                        (screen_width // 2 - 200 + 2, 100 + 2))
+            screen.blit(title, (screen_width // 2 - 200, 100))
+
+            screen.blit(FONT_MENU_OPTION.render("Press H to HOST (Player 1)", True, TEXT_SHADOW),
+                        (screen_width // 2 - 220 + 2, 250 + 2))
+            screen.blit(option1, (screen_width // 2 - 220, 250))
+
+            screen.blit(FONT_MENU_OPTION.render("Press J to JOIN (Player 2)", True, TEXT_SHADOW),
+                        (screen_width // 2 - 220 + 2, 300 + 2))
+            screen.blit(option2, (screen_width // 2 - 220, 300))
+
+        elif mode == "JOIN":
+            # join / IP entry UI
+            draw_center_text(screen, FONT_MENU_TITLE, "JOIN GAME (Player 2)", y_offset=-100)
+            draw_center_text(screen, FONT_SUB, "Enter Host IP Address:", y_offset=-40)
+
+            ip_surf = FONT_MENU_OPTION.render(typed_ip, True, TEXT_COLOR)
+            ip_rect = ip_surf.get_rect(center=(screen_width // 2, screen_height // 2))
+            screen.blit(ip_surf, ip_rect)
+
+            draw_center_text(screen, FONT_STATUS, "ENTER = Connect   ESC = Back", y_offset=80)
+
+        pygame.display.flip()
+        fps.tick(30)
 
 
 # === Main Function ===
