@@ -15,6 +15,7 @@ import random
 import json
 import socket
 import threading
+import math
 
 # === Settings ===
 snake_speed = 10  # speed of snake (logic FPS)
@@ -40,6 +41,7 @@ TEXT_SHADOW = (0, 0, 0)
 STATE_COUNTDOWN = "COUNTDOWN"
 STATE_RUNNING = "RUNNING"
 STATE_PAUSED = "PAUSED"
+STATE_GAME_OVER = "GAME_OVER"
 
 COUNTDOWN_SECONDS = 3
 
@@ -70,6 +72,8 @@ running = True
 typed_ip = "" # ADD IP 
 typing_ip = False
 host_ip_text = ""  # TEXT SHOWN ON HOST SCREEN
+back_to_menu = False
+game_winner = None
 
 # === Snake + Fruit State (will be reset by reset_game_state) ===
 snake1_pos = [screen_width // 4, screen_height // 2]
@@ -123,10 +127,28 @@ def draw_snake(surface, body, fill_color, outline_color):
 
 
 def draw_fruit(surface, pos):
+    # TIME BASED
+    t = pygame.time.get_ticks() / 250.0  
+    pulse = (math.sin(t) + 1) / 2        # 0..1
+
+    # BASE RADII
+    base_outer = CELL // 2
+    base_inner = CELL // 3
+
+    # PULSE AMOUNT (GROW/SHRINK)
+    outer_pulse = 2
+    inner_pulse = 1
+
+    outer_r = base_outer + int(outer_pulse * pulse)
+    inner_r = base_inner + int(inner_pulse * pulse)
+
     cx = pos[0] + CELL // 2
     cy = pos[1] + CELL // 2
-    pygame.draw.circle(surface, FRUIT_GLOW, (cx, cy), CELL // 2)
-    pygame.draw.circle(surface, FRUIT_COLOR, (cx, cy), CELL // 3)
+
+    # OUTER GLOW
+    pygame.draw.circle(surface, FRUIT_GLOW, (cx, cy), outer_r)
+    # INNER GLOW
+    pygame.draw.circle(surface, FRUIT_COLOR, (cx, cy), inner_r)
 
 
 def draw_center_text(surface, font, text, y_offset=0):
@@ -141,7 +163,7 @@ def draw_center_text(surface, font, text, y_offset=0):
 # === Network Functions ===
 def receive_messages(sock):
     """Continuously receive messages from peer"""
-    global remote_snake_data, peer_connected, running, game_state, countdown_start_ms, paused_by
+    global remote_snake_data, peer_connected, running, game_state, countdown_start_ms, paused_by, back_to_menu
     buffer = ""
     
     while running:
@@ -181,6 +203,10 @@ def receive_messages(sock):
                                 reset_game_state()
                                 game_state = STATE_COUNTDOWN
                                 countdown_start_ms = pygame.time.get_ticks()
+                            elif msg_type == 'quit_to_menu':
+                                # PEERS WANTS TO GO BACK TO MAIN MENU
+                                back_to_menu = True
+                                peer_connected = False
                     except json.JSONDecodeError:
                         pass
         except socket.timeout:
@@ -481,46 +507,16 @@ def reset_game_state():
 
 # === Game Over ===
 def game_over(winner=None):
-    global running
-    my_font = pygame.font.SysFont('times new roman', 50)
-    msg = "Draw!" if not winner else f"{winner} Wins!"
-    
-    # Draw final frame UI
-    draw_background(screen)
-    draw_snake(screen, snake1_body, P1_COLOR, P1_OUTLINE)
-    draw_snake(screen, snake2_body, P2_COLOR, P2_OUTLINE)
-    draw_fruit(screen, fruit_pos)
-    show_score()
-    show_connection_status()
-    draw_controls()
+    """Enter game-over state and store winner; don't quit app."""
+    global game_state, game_winner, paused_by
 
-    # Overlay message with shadow
-    shadow = my_font.render(msg, True, TEXT_SHADOW)
-    text_surf = my_font.render(msg, True, (255, 80, 80))
-    rect = text_surf.get_rect()
-    rect.midtop = (screen_width / 2, screen_height / 4)
-    screen.blit(shadow, (rect.x + 2, rect.y + 2))
-    screen.blit(text_surf, rect)
-    
-    pygame.display.flip()
-    
-    time.sleep(2)
-    
-    # Clean up network
-    running = False
-    if client_socket:
-        try:
-            client_socket.close()
-        except:
-            pass
-    if server_socket:
-        try:
-            server_socket.close()
-        except:
-            pass
-    
-    pygame.quit()
-    quit()
+    game_state = STATE_GAME_OVER
+    paused_by = None
+
+    if winner:
+        game_winner = f"{winner} Wins!"
+    else:
+        game_winner = "Draw!"
 
 
 # === Main Menu ===
@@ -625,6 +621,7 @@ def main():
     global snake1_pos, snake1_body, snake1_direction, snake1_change_to, snake1_score
     global snake2_pos, snake2_body, snake2_direction, snake2_change_to, snake2_score
     global fruit_pos, fruit_spawn, running, game_state, countdown_start_ms, connection_initialized, paused_by
+    global peer_connected, client_socket, server_socket, back_to_menu
     
     # Show menu and setup connection
     main_menu()
@@ -647,15 +644,32 @@ def main():
                 pygame.quit()
                 quit()
             elif event.type == pygame.KEYDOWN:
-                # ESC always quits
+                # ESC BEHAVIOR DEPENDS ON STATE
                 if event.key == pygame.K_ESCAPE:
-                    running = False
-                    if client_socket:
-                        client_socket.close()
-                    if server_socket:
-                        server_socket.close()
-                    pygame.quit()
-                    quit()
+                    if game_state == STATE_RUNNING:
+                        # IGNORE WHILE GAME IN PROGRESS
+                        pass
+                    else:
+                        # FROM PAUSED OR COUNTDOWN: RETURN BOTH PLAYERS TO MAIN MENU
+                        if peer_connected:
+                            send_control_message('quit_to_menu')
+                        if client_socket:
+                            client_socket.close()
+                            client_socket = None
+                        if server_socket:
+                            server_socket.close()
+                            server_socket = None
+                        peer_connected = False
+                        back_to_menu = False 
+
+                        # BACK TO MAIN MENU LOCALLY
+                        main_menu()
+                        reset_game_state()
+                        game_state = STATE_COUNTDOWN
+                        countdown_start_ms = 0
+                        connection_initialized = False
+                        paused_by = None
+                        continue  # SKIP ITERATION
 
                 # Pause / resume (local)
                 if event.key == pygame.K_p and peer_connected:
@@ -698,6 +712,26 @@ def main():
                             snake2_change_to = 'LEFT'
                         elif event.key == pygame.K_RIGHT:
                             snake2_change_to = 'RIGHT'
+
+        # IF PEER ASKED TO GO BACK TO THE MAIN MENU
+        if back_to_menu:
+            # CLOSE SOCKET
+            if client_socket:
+                client_socket.close()
+            if server_socket:
+                server_socket.close()
+
+            peer_connected = False
+            back_to_menu = False
+
+            # RETURN TO MENU AND RESET GAME
+            main_menu()
+            reset_game_state()
+            game_state = STATE_COUNTDOWN
+            countdown_start_ms = 0
+            connection_initialized = False
+            paused_by = None
+            continue  # CLEAN LOOP RESTART
 
         # Only proceed with game logic if peer is connected
         if not peer_connected:
@@ -842,7 +876,7 @@ def main():
         show_connection_status()
         draw_controls()
 
-        # Overlays for countdown / pause
+        # Overlays for countdown / pause / game over
         if game_state == STATE_COUNTDOWN:
             now = pygame.time.get_ticks()
             elapsed = (now - countdown_start_ms) / 1000.0
@@ -860,6 +894,14 @@ def main():
             info = f"{paused_by} paused the game" if paused_by else "Game paused"
             draw_center_text(screen, FONT_SUB, info, y_offset=40)
             draw_center_text(screen, FONT_SUB, "Press P to resume or R to reset", y_offset=80)
+
+        elif game_state == STATE_GAME_OVER:
+            # SHOW WINNER AND OPTIONS
+            title = game_winner if game_winner else "Game Over"
+            draw_center_text(screen, FONT_COUNTDOWN, title, y_offset=-10)
+            draw_center_text(screen, FONT_SUB,
+                             "Press R for rematch or ESC for main menu",
+                             y_offset=40)
 
         pygame.display.update()
         fps.tick(snake_speed)
