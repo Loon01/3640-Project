@@ -16,3 +16,6 @@
 - To run file, do:
 
   - python3 snake_p2p_simple.py
+
+======= Note =========
+- Game might only be ran on the same network.
